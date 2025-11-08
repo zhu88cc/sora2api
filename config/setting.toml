@@ -29,7 +29,6 @@ image_timeout = 300
 video_timeout = 1500
 
 [admin]
-video_cooldown_threshold = 30
 error_ban_threshold = 3
 
 [proxy]
@@ -38,6 +37,9 @@ proxy_url = ""
 
 [watermark_free]
 watermark_free_enabled = false
+parse_method = "third_party"
+custom_parse_url = ""
+custom_parse_token = ""
 
 [video_length]
 default_length = "10s"

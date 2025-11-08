@@ -325,3 +325,95 @@ class SoraClient:
                 raise Exception(error_msg)
 
             return True
+
+    async def get_watermark_free_url_custom(self, parse_url: str, parse_token: str, post_id: str) -> str:
+        """Get watermark-free video URL from custom parse server
+
+        Args:
+            parse_url: Custom parse server URL (e.g., http://example.com)
+            parse_token: Access token for custom parse server
+            post_id: Post ID to parse (e.g., s_690c0f574c3881918c3bc5b682a7e9fd)
+
+        Returns:
+            Download link from custom parse server
+
+        Raises:
+            Exception: If parse fails or token is invalid
+        """
+        proxy_url = await self.proxy_manager.get_proxy_url()
+
+        # Construct the share URL
+        share_url = f"https://sora.chatgpt.com/p/{post_id}"
+
+        # Prepare request
+        json_data = {
+            "url": share_url,
+            "token": parse_token
+        }
+
+        kwargs = {
+            "json": json_data,
+            "timeout": 30,
+            "impersonate": "chrome"
+        }
+
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+
+        try:
+            async with AsyncSession() as session:
+                # Record start time
+                start_time = time.time()
+
+                # Make POST request to custom parse server
+                response = await session.post(f"{parse_url}/get-sora-link", **kwargs)
+
+                # Calculate duration
+                duration_ms = (time.time() - start_time) * 1000
+
+                # Log response
+                debug_logger.log_response(
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    body=response.text if response.text else "No content",
+                    duration_ms=duration_ms
+                )
+
+                # Check status
+                if response.status_code != 200:
+                    error_msg = f"Custom parse failed: {response.status_code} - {response.text}"
+                    debug_logger.log_error(
+                        error_message=error_msg,
+                        status_code=response.status_code,
+                        response_text=response.text
+                    )
+                    raise Exception(error_msg)
+
+                # Parse response
+                result = response.json()
+
+                # Check for error in response
+                if "error" in result:
+                    error_msg = f"Custom parse error: {result['error']}"
+                    debug_logger.log_error(
+                        error_message=error_msg,
+                        status_code=401,
+                        response_text=str(result)
+                    )
+                    raise Exception(error_msg)
+
+                # Extract download link
+                download_link = result.get("download_link")
+                if not download_link:
+                    raise Exception("No download_link in custom parse response")
+
+                debug_logger.log_info(f"Custom parse successful: {download_link}")
+                return download_link
+
+        except Exception as e:
+            debug_logger.log_error(
+                error_message=f"Custom parse request failed: {str(e)}",
+                status_code=500,
+                response_text=str(e)
+            )
+            raise

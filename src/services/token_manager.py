@@ -1,9 +1,11 @@
 """Token management module"""
 import jwt
 import asyncio
+import random
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from curl_cffi.requests import AsyncSession
+from faker import Faker
 from ..core.database import Database
 from ..core.models import Token, TokenStats
 from ..core.config import config
@@ -16,6 +18,7 @@ class TokenManager:
         self.db = db
         self._lock = asyncio.Lock()
         self.proxy_manager = ProxyManager(db)
+        self.fake = Faker()
     
     async def decode_jwt(self, token: str) -> dict:
         """Decode JWT token without verification"""
@@ -24,7 +27,37 @@ class TokenManager:
             return decoded
         except Exception as e:
             raise ValueError(f"Invalid JWT token: {str(e)}")
-    
+
+    def _generate_random_username(self) -> str:
+        """Generate a random username using faker
+
+        Returns:
+            A random username string
+        """
+        # 生成真实姓名
+        first_name = self.fake.first_name()
+        last_name = self.fake.last_name()
+
+        # 去除姓名中的空格和特殊字符，只保留字母
+        first_name_clean = ''.join(c for c in first_name if c.isalpha())
+        last_name_clean = ''.join(c for c in last_name if c.isalpha())
+
+        # 生成1-4位随机数字
+        random_digits = str(random.randint(1, 9999))
+
+        # 随机选择用户名格式
+        format_choice = random.choice([
+            f"{first_name_clean}{last_name_clean}{random_digits}",
+            f"{first_name_clean}.{last_name_clean}{random_digits}",
+            f"{first_name_clean}{random_digits}",
+            f"{last_name_clean}{random_digits}",
+            f"{first_name_clean[0]}{last_name_clean}{random_digits}",
+            f"{first_name_clean}{last_name_clean[0]}{random_digits}"
+        ])
+
+        # 转换为小写
+        return format_choice.lower()
+
     async def get_user_info(self, access_token: str) -> dict:
         """Get user info from Sora API"""
         proxy_url = await self.proxy_manager.get_proxy_url()
@@ -177,6 +210,158 @@ class TokenManager:
                     "supported": False,
                     "invite_code": None
                 }
+
+    async def get_sora2_remaining_count(self, access_token: str) -> dict:
+        """Get Sora2 remaining video count
+
+        Returns:
+            {
+                "remaining_count": 27,
+                "rate_limit_reached": false,
+                "access_resets_in_seconds": 46833
+            }
+        """
+        proxy_url = await self.proxy_manager.get_proxy_url()
+
+        print(f"🔍 开始获取Sora2剩余次数...")
+
+        async with AsyncSession() as session:
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json"
+            }
+
+            kwargs = {
+                "headers": headers,
+                "timeout": 30,
+                "impersonate": "chrome"  # 自动生成 User-Agent 和浏览器指纹
+            }
+
+            if proxy_url:
+                kwargs["proxy"] = proxy_url
+                print(f"🌐 使用代理: {proxy_url}")
+
+            response = await session.get(
+                "https://sora.chatgpt.com/backend/nf/check",
+                **kwargs
+            )
+
+            print(f"📥 响应状态码: {response.status_code}")
+
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ Sora2剩余次数获取成功: {data}")
+
+                rate_limit_info = data.get("rate_limit_and_credit_balance", {})
+                return {
+                    "success": True,
+                    "remaining_count": rate_limit_info.get("estimated_num_videos_remaining", 0),
+                    "rate_limit_reached": rate_limit_info.get("rate_limit_reached", False),
+                    "access_resets_in_seconds": rate_limit_info.get("access_resets_in_seconds", 0)
+                }
+            else:
+                print(f"❌ 获取Sora2剩余次数失败: {response.status_code}")
+                print(f"📄 响应内容: {response.text[:500]}")
+                return {
+                    "success": False,
+                    "remaining_count": 0,
+                    "error": f"Failed to get remaining count: {response.status_code}"
+                }
+
+    async def check_username_available(self, access_token: str, username: str) -> bool:
+        """Check if username is available
+
+        Args:
+            access_token: Access token for authentication
+            username: Username to check
+
+        Returns:
+            True if username is available, False otherwise
+        """
+        proxy_url = await self.proxy_manager.get_proxy_url()
+
+        print(f"🔍 检查用户名是否可用: {username}")
+
+        async with AsyncSession() as session:
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
+
+            kwargs = {
+                "headers": headers,
+                "json": {"username": username},
+                "timeout": 30,
+                "impersonate": "chrome"
+            }
+
+            if proxy_url:
+                kwargs["proxy"] = proxy_url
+                print(f"🌐 使用代理: {proxy_url}")
+
+            response = await session.post(
+                "https://sora.chatgpt.com/backend/project_y/profile/username/check",
+                **kwargs
+            )
+
+            print(f"📥 响应状态码: {response.status_code}")
+
+            if response.status_code == 200:
+                data = response.json()
+                available = data.get("available", False)
+                print(f"✅ 用户名检查结果: available={available}")
+                return available
+            else:
+                print(f"❌ 用户名检查失败: {response.status_code}")
+                print(f"📄 响应内容: {response.text[:500]}")
+                return False
+
+    async def set_username(self, access_token: str, username: str) -> dict:
+        """Set username for the account
+
+        Args:
+            access_token: Access token for authentication
+            username: Username to set
+
+        Returns:
+            User profile information after setting username
+        """
+        proxy_url = await self.proxy_manager.get_proxy_url()
+
+        print(f"🔍 开始设置用户名: {username}")
+
+        async with AsyncSession() as session:
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
+
+            kwargs = {
+                "headers": headers,
+                "json": {"username": username},
+                "timeout": 30,
+                "impersonate": "chrome"
+            }
+
+            if proxy_url:
+                kwargs["proxy"] = proxy_url
+                print(f"🌐 使用代理: {proxy_url}")
+
+            response = await session.post(
+                "https://sora.chatgpt.com/backend/project_y/profile/username/set",
+                **kwargs
+            )
+
+            print(f"📥 响应状态码: {response.status_code}")
+
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ 用户名设置成功: {data.get('username')}")
+                return data
+            else:
+                print(f"❌ 用户名设置失败: {response.status_code}")
+                print(f"📄 响应内容: {response.text[:500]}")
+                raise Exception(f"Failed to set username: {response.status_code}")
 
     async def activate_sora2_invite(self, access_token: str, invite_code: str) -> dict:
         """Activate Sora2 with invite code"""
@@ -375,15 +560,62 @@ class TokenManager:
         sora2_invite_code = None
         sora2_redeemed_count = 0
         sora2_total_count = 0
+        sora2_remaining_count = 0
         try:
             sora2_info = await self.get_sora2_invite_code(token_value)
             sora2_supported = sora2_info.get("supported", False)
             sora2_invite_code = sora2_info.get("invite_code")
             sora2_redeemed_count = sora2_info.get("redeemed_count", 0)
             sora2_total_count = sora2_info.get("total_count", 0)
+
+            # If Sora2 is supported, get remaining count
+            if sora2_supported:
+                try:
+                    remaining_info = await self.get_sora2_remaining_count(token_value)
+                    if remaining_info.get("success"):
+                        sora2_remaining_count = remaining_info.get("remaining_count", 0)
+                        print(f"✅ Sora2剩余次数: {sora2_remaining_count}")
+                except Exception as e:
+                    print(f"Failed to get Sora2 remaining count: {e}")
         except Exception as e:
             # If API call fails, Sora2 info will be None
             print(f"Failed to get Sora2 info: {e}")
+
+        # Check and set username if needed
+        try:
+            # Get fresh user info to check username
+            user_info = await self.get_user_info(token_value)
+            username = user_info.get("username")
+
+            # If username is null, need to set one
+            if username is None:
+                print(f"⚠️  检测到用户名为null，需要设置用户名")
+
+                # Generate random username
+                max_attempts = 5
+                for attempt in range(max_attempts):
+                    generated_username = self._generate_random_username()
+                    print(f"🔄 尝试用户名 ({attempt + 1}/{max_attempts}): {generated_username}")
+
+                    # Check if username is available
+                    if await self.check_username_available(token_value, generated_username):
+                        # Set the username
+                        try:
+                            await self.set_username(token_value, generated_username)
+                            print(f"✅ 用户名设置成功: {generated_username}")
+                            break
+                        except Exception as e:
+                            print(f"❌ 用户名设置失败: {e}")
+                            if attempt == max_attempts - 1:
+                                print(f"⚠️  达到最大尝试次数，跳过用户名设置")
+                    else:
+                        print(f"⚠️  用户名 {generated_username} 已被占用，尝试下一个")
+                        if attempt == max_attempts - 1:
+                            print(f"⚠️  达到最大尝试次数，跳过用户名设置")
+            else:
+                print(f"✅ 用户名已设置: {username}")
+        except Exception as e:
+            print(f"⚠️  用户名检查/设置过程中出错: {e}")
 
         # Create token object
         token = Token(
@@ -401,7 +633,8 @@ class TokenManager:
             sora2_supported=sora2_supported,
             sora2_invite_code=sora2_invite_code,
             sora2_redeemed_count=sora2_redeemed_count,
-            sora2_total_count=sora2_total_count
+            sora2_total_count=sora2_total_count,
+            sora2_remaining_count=sora2_remaining_count
         )
 
         # Save to database
@@ -523,6 +756,16 @@ class TokenManager:
             sora2_invite_code = sora2_info.get("invite_code")
             sora2_redeemed_count = sora2_info.get("redeemed_count", 0)
             sora2_total_count = sora2_info.get("total_count", 0)
+            sora2_remaining_count = 0
+
+            # If Sora2 is supported, get remaining count
+            if sora2_supported:
+                try:
+                    remaining_info = await self.get_sora2_remaining_count(token_data.token)
+                    if remaining_info.get("success"):
+                        sora2_remaining_count = remaining_info.get("remaining_count", 0)
+                except Exception as e:
+                    print(f"Failed to get Sora2 remaining count: {e}")
 
             # Update token Sora2 info in database
             await self.db.update_token_sora2(
@@ -530,7 +773,8 @@ class TokenManager:
                 supported=sora2_supported,
                 invite_code=sora2_invite_code,
                 redeemed_count=sora2_redeemed_count,
-                total_count=sora2_total_count
+                total_count=sora2_total_count,
+                remaining_count=sora2_remaining_count
             )
 
             return {
@@ -541,7 +785,8 @@ class TokenManager:
                 "sora2_supported": sora2_supported,
                 "sora2_invite_code": sora2_invite_code,
                 "sora2_redeemed_count": sora2_redeemed_count,
-                "sora2_total_count": sora2_total_count
+                "sora2_total_count": sora2_total_count,
+                "sora2_remaining_count": sora2_remaining_count
             }
         except Exception as e:
             return {
@@ -569,16 +814,51 @@ class TokenManager:
         if stats and stats.error_count >= admin_config.error_ban_threshold:
             await self.db.update_token_status(token_id, False)
     
-    async def record_success(self, token_id: int):
+    async def record_success(self, token_id: int, is_video: bool = False):
         """Record successful request (reset error count)"""
         await self.db.reset_error_count(token_id)
+
+        # Update Sora2 remaining count after video generation
+        if is_video:
+            try:
+                token_data = await self.db.get_token(token_id)
+                if token_data and token_data.sora2_supported:
+                    remaining_info = await self.get_sora2_remaining_count(token_data.token)
+                    if remaining_info.get("success"):
+                        remaining_count = remaining_info.get("remaining_count", 0)
+                        await self.db.update_token_sora2_remaining(token_id, remaining_count)
+                        print(f"✅ 更新Token {token_id} 的Sora2剩余次数: {remaining_count}")
+
+                        # If remaining count is 0, set cooldown
+                        if remaining_count == 0:
+                            reset_seconds = remaining_info.get("access_resets_in_seconds", 0)
+                            if reset_seconds > 0:
+                                cooldown_until = datetime.now() + timedelta(seconds=reset_seconds)
+                                await self.db.update_token_sora2_cooldown(token_id, cooldown_until)
+                                print(f"⏱️ Token {token_id} 剩余次数为0，设置冷却时间至: {cooldown_until}")
+            except Exception as e:
+                print(f"Failed to update Sora2 remaining count: {e}")
     
-    async def check_and_apply_cooldown(self, token_id: int):
-        """Check if token should be cooled down"""
-        stats = await self.db.get_token_stats(token_id)
-        admin_config = await self.db.get_admin_config()
-        
-        if stats and stats.video_count >= admin_config.video_cooldown_threshold:
-            # Apply 12 hour cooldown
-            cooled_until = datetime.now() + timedelta(hours=12)
-            await self.db.update_token_cooldown(token_id, cooled_until)
+    async def refresh_sora2_remaining_if_cooldown_expired(self, token_id: int):
+        """Refresh Sora2 remaining count if cooldown has expired"""
+        try:
+            token_data = await self.db.get_token(token_id)
+            if not token_data or not token_data.sora2_supported:
+                return
+
+            # Check if Sora2 cooldown has expired
+            if token_data.sora2_cooldown_until and token_data.sora2_cooldown_until <= datetime.now():
+                print(f"🔄 Token {token_id} Sora2冷却已过期，正在刷新剩余次数...")
+
+                try:
+                    remaining_info = await self.get_sora2_remaining_count(token_data.token)
+                    if remaining_info.get("success"):
+                        remaining_count = remaining_info.get("remaining_count", 0)
+                        await self.db.update_token_sora2_remaining(token_id, remaining_count)
+                        # Clear cooldown
+                        await self.db.update_token_sora2_cooldown(token_id, None)
+                        print(f"✅ Token {token_id} Sora2剩余次数已刷新: {remaining_count}")
+                except Exception as e:
+                    print(f"Failed to refresh Sora2 remaining count: {e}")
+        except Exception as e:
+            print(f"Error in refresh_sora2_remaining_if_cooldown_expired: {e}")

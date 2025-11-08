@@ -145,13 +145,28 @@ class Config:
     @property
     def watermark_free_enabled(self) -> bool:
         """Get watermark-free mode enabled status"""
-        return self._config.get("watermark_free", {}).get("enabled", False)
+        return self._config.get("watermark_free", {}).get("watermark_free_enabled", False)
 
     def set_watermark_free_enabled(self, enabled: bool):
         """Set watermark-free mode enabled/disabled"""
         if "watermark_free" not in self._config:
             self._config["watermark_free"] = {}
-        self._config["watermark_free"]["enabled"] = enabled
+        self._config["watermark_free"]["watermark_free_enabled"] = enabled
+
+    @property
+    def watermark_free_parse_method(self) -> str:
+        """Get watermark-free parse method"""
+        return self._config.get("watermark_free", {}).get("parse_method", "third_party")
+
+    @property
+    def watermark_free_custom_url(self) -> str:
+        """Get custom parse server URL"""
+        return self._config.get("watermark_free", {}).get("custom_parse_url", "")
+
+    @property
+    def watermark_free_custom_token(self) -> str:
+        """Get custom parse server access token"""
+        return self._config.get("watermark_free", {}).get("custom_parse_token", "")
 
 # Global config instance
 config = Config()

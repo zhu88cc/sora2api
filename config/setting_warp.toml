@@ -29,7 +29,6 @@ image_timeout = 300
 video_timeout = 1500
 
 [admin]
-video_cooldown_threshold = 30
 error_ban_threshold = 3
 
 [proxy]

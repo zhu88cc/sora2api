@@ -79,7 +79,6 @@ class UpdateTokenRequest(BaseModel):
     remark: Optional[str] = None
 
 class UpdateAdminConfigRequest(BaseModel):
-    video_cooldown_threshold: int
     error_ban_threshold: int
 
 class UpdateProxyConfigRequest(BaseModel):
@@ -109,6 +108,9 @@ class UpdateGenerationTimeoutRequest(BaseModel):
 
 class UpdateWatermarkFreeConfigRequest(BaseModel):
     watermark_free_enabled: bool
+    parse_method: Optional[str] = "third_party"  # "third_party" or "custom"
+    custom_parse_url: Optional[str] = None
+    custom_parse_token: Optional[str] = None
 
 class UpdateVideoLengthConfigRequest(BaseModel):
     default_length: str  # "10s" or "15s"
@@ -139,7 +141,7 @@ async def get_tokens(token: str = Depends(verify_admin_token)) -> List[dict]:
     """Get all tokens with statistics"""
     tokens = await token_manager.get_all_tokens()
     result = []
-    
+
     for token in tokens:
         stats = await db.get_token_stats(token.id)
         result.append({
@@ -167,9 +169,11 @@ async def get_tokens(token: str = Depends(verify_admin_token)) -> List[dict]:
             "sora2_supported": token.sora2_supported,
             "sora2_invite_code": token.sora2_invite_code,
             "sora2_redeemed_count": token.sora2_redeemed_count,
-            "sora2_total_count": token.sora2_total_count
+            "sora2_total_count": token.sora2_total_count,
+            "sora2_remaining_count": token.sora2_remaining_count,
+            "sora2_cooldown_until": token.sora2_cooldown_until.isoformat() if token.sora2_cooldown_until else None
         })
-    
+
     return result
 
 @router.post("/api/tokens")
@@ -275,7 +279,8 @@ async def test_token(token_id: int, token: str = Depends(verify_admin_token)):
                 "sora2_supported": result.get("sora2_supported"),
                 "sora2_invite_code": result.get("sora2_invite_code"),
                 "sora2_redeemed_count": result.get("sora2_redeemed_count"),
-                "sora2_total_count": result.get("sora2_total_count")
+                "sora2_total_count": result.get("sora2_total_count"),
+                "sora2_remaining_count": result.get("sora2_remaining_count")
             })
 
         return response
@@ -316,7 +321,6 @@ async def get_admin_config(token: str = Depends(verify_admin_token)) -> dict:
     """Get admin configuration"""
     admin_config = await db.get_admin_config()
     return {
-        "video_cooldown_threshold": admin_config.video_cooldown_threshold,
         "error_ban_threshold": admin_config.error_ban_threshold,
         "api_key": config.api_key,
         "admin_username": config.admin_username,
@@ -331,7 +335,6 @@ async def update_admin_config(
     """Update admin configuration"""
     try:
         admin_config = AdminConfig(
-            video_cooldown_threshold=request.video_cooldown_threshold,
             error_ban_threshold=request.error_ban_threshold
         )
         await db.update_admin_config(admin_config)
@@ -480,9 +483,12 @@ async def update_proxy_config(
 @router.get("/api/watermark-free/config")
 async def get_watermark_free_config(token: str = Depends(verify_admin_token)) -> dict:
     """Get watermark-free mode configuration"""
-    config = await db.get_watermark_free_config()
+    config_obj = await db.get_watermark_free_config()
     return {
-        "watermark_free_enabled": config.watermark_free_enabled
+        "watermark_free_enabled": config_obj.watermark_free_enabled,
+        "parse_method": config_obj.parse_method,
+        "custom_parse_url": config_obj.custom_parse_url,
+        "custom_parse_token": config_obj.custom_parse_token
     }
 
 @router.post("/api/watermark-free/config")
@@ -492,7 +498,12 @@ async def update_watermark_free_config(
 ):
     """Update watermark-free mode configuration"""
     try:
-        await db.update_watermark_free_config(request.watermark_free_enabled)
+        await db.update_watermark_free_config(
+            request.watermark_free_enabled,
+            request.parse_method,
+            request.custom_parse_url,
+            request.custom_parse_token
+        )
 
         # Update in-memory config
         from ..core.config import config
@@ -549,13 +560,23 @@ async def activate_sora2(
             # Get new invite code after activation
             sora2_info = await token_manager.get_sora2_invite_code(token_obj.token)
 
+            # Get remaining count
+            sora2_remaining_count = 0
+            try:
+                remaining_info = await token_manager.get_sora2_remaining_count(token_obj.token)
+                if remaining_info.get("success"):
+                    sora2_remaining_count = remaining_info.get("remaining_count", 0)
+            except Exception as e:
+                print(f"Failed to get Sora2 remaining count: {e}")
+
             # Update database
             await db.update_token_sora2(
                 token_id,
                 supported=True,
                 invite_code=sora2_info.get("invite_code"),
                 redeemed_count=sora2_info.get("redeemed_count", 0),
-                total_count=sora2_info.get("total_count", 0)
+                total_count=sora2_info.get("total_count", 0),
+                remaining_count=sora2_remaining_count
             )
 
             return {
@@ -564,7 +585,8 @@ async def activate_sora2(
                 "already_accepted": result.get("already_accepted", False),
                 "invite_code": sora2_info.get("invite_code"),
                 "redeemed_count": sora2_info.get("redeemed_count", 0),
-                "total_count": sora2_info.get("total_count", 0)
+                "total_count": sora2_info.get("total_count", 0),
+                "sora2_remaining_count": sora2_remaining_count
             }
         else:
             return {

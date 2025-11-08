@@ -47,7 +47,9 @@ class Database:
                     sora2_supported BOOLEAN,
                     sora2_invite_code TEXT,
                     sora2_redeemed_count INTEGER DEFAULT 0,
-                    sora2_total_count INTEGER DEFAULT 0
+                    sora2_total_count INTEGER DEFAULT 0,
+                    sora2_remaining_count INTEGER DEFAULT 0,
+                    sora2_cooldown_until TIMESTAMP
                 )
             """)
 
@@ -71,7 +73,33 @@ class Database:
                 await db.execute("ALTER TABLE tokens ADD COLUMN sora2_total_count INTEGER DEFAULT 0")
             except:
                 pass  # Column already exists
-            
+
+            try:
+                await db.execute("ALTER TABLE tokens ADD COLUMN sora2_remaining_count INTEGER DEFAULT 0")
+            except:
+                pass  # Column already exists
+
+            try:
+                await db.execute("ALTER TABLE tokens ADD COLUMN sora2_cooldown_until TIMESTAMP")
+            except:
+                pass  # Column already exists
+
+            # Migrate watermark_free_config table - add new columns
+            try:
+                await db.execute("ALTER TABLE watermark_free_config ADD COLUMN parse_method TEXT DEFAULT 'third_party'")
+            except:
+                pass  # Column already exists
+
+            try:
+                await db.execute("ALTER TABLE watermark_free_config ADD COLUMN custom_parse_url TEXT")
+            except:
+                pass  # Column already exists
+
+            try:
+                await db.execute("ALTER TABLE watermark_free_config ADD COLUMN custom_parse_token TEXT")
+            except:
+                pass  # Column already exists
+
             # Token stats table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS token_stats (
@@ -122,7 +150,6 @@ class Database:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS admin_config (
                     id INTEGER PRIMARY KEY DEFAULT 1,
-                    video_cooldown_threshold INTEGER DEFAULT 30,
                     error_ban_threshold INTEGER DEFAULT 3,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -144,6 +171,9 @@ class Database:
                 CREATE TABLE IF NOT EXISTS watermark_free_config (
                     id INTEGER PRIMARY KEY DEFAULT 1,
                     watermark_free_enabled BOOLEAN DEFAULT 0,
+                    parse_method TEXT DEFAULT 'third_party',
+                    custom_parse_url TEXT,
+                    custom_parse_token TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -167,8 +197,8 @@ class Database:
             
             # Insert default admin config
             await db.execute("""
-                INSERT OR IGNORE INTO admin_config (id, video_cooldown_threshold, error_ban_threshold)
-                VALUES (1, 30, 3)
+                INSERT OR IGNORE INTO admin_config (id, error_ban_threshold)
+                VALUES (1, 3)
             """)
             
             # Insert default proxy config
@@ -179,8 +209,8 @@ class Database:
 
             # Insert default watermark-free config
             await db.execute("""
-                INSERT OR IGNORE INTO watermark_free_config (id, watermark_free_enabled)
-                VALUES (1, 0)
+                INSERT OR IGNORE INTO watermark_free_config (id, watermark_free_enabled, parse_method, custom_parse_url, custom_parse_token)
+                VALUES (1, 0, 'third_party', NULL, NULL)
             """)
 
             # Insert default video length config
@@ -196,14 +226,13 @@ class Database:
         async with aiosqlite.connect(self.db_path) as db:
             # Initialize admin config
             admin_config = config_dict.get("admin", {})
-            video_cooldown_threshold = admin_config.get("video_cooldown_threshold", 30)
             error_ban_threshold = admin_config.get("error_ban_threshold", 3)
 
             await db.execute("""
                 UPDATE admin_config
-                SET video_cooldown_threshold = ?, error_ban_threshold = ?, updated_at = CURRENT_TIMESTAMP
+                SET error_ban_threshold = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
-            """, (video_cooldown_threshold, error_ban_threshold))
+            """, (error_ban_threshold,))
 
             # Initialize proxy config
             proxy_config = config_dict.get("proxy", {})
@@ -221,12 +250,20 @@ class Database:
             # Initialize watermark-free config
             watermark_config = config_dict.get("watermark_free", {})
             watermark_free_enabled = watermark_config.get("watermark_free_enabled", False)
+            parse_method = watermark_config.get("parse_method", "third_party")
+            custom_parse_url = watermark_config.get("custom_parse_url", "")
+            custom_parse_token = watermark_config.get("custom_parse_token", "")
+
+            # Convert empty strings to None
+            custom_parse_url = custom_parse_url if custom_parse_url else None
+            custom_parse_token = custom_parse_token if custom_parse_token else None
 
             await db.execute("""
                 UPDATE watermark_free_config
-                SET watermark_free_enabled = ?, updated_at = CURRENT_TIMESTAMP
+                SET watermark_free_enabled = ?, parse_method = ?, custom_parse_url = ?,
+                    custom_parse_token = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
-            """, (watermark_free_enabled,))
+            """, (watermark_free_enabled, parse_method, custom_parse_url, custom_parse_token))
 
             # Initialize video length config
             video_length_config = config_dict.get("video_length", {})
@@ -249,13 +286,14 @@ class Database:
             cursor = await db.execute("""
                 INSERT INTO tokens (token, email, username, name, st, rt, remark, expiry_time, is_active,
                                    plan_type, plan_title, subscription_end, sora2_supported, sora2_invite_code,
-                                   sora2_redeemed_count, sora2_total_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   sora2_redeemed_count, sora2_total_count, sora2_remaining_count, sora2_cooldown_until)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (token.token, token.email, "", token.name, token.st, token.rt,
                   token.remark, token.expiry_time, token.is_active,
                   token.plan_type, token.plan_title, token.subscription_end,
                   token.sora2_supported, token.sora2_invite_code,
-                  token.sora2_redeemed_count, token.sora2_total_count))
+                  token.sora2_redeemed_count, token.sora2_total_count,
+                  token.sora2_remaining_count, token.sora2_cooldown_until))
             await db.commit()
             token_id = cursor.lastrowid
 
@@ -328,14 +366,30 @@ class Database:
             await db.commit()
     
     async def update_token_sora2(self, token_id: int, supported: bool, invite_code: Optional[str] = None,
-                                redeemed_count: int = 0, total_count: int = 0):
+                                redeemed_count: int = 0, total_count: int = 0, remaining_count: int = 0):
         """Update token Sora2 support info"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 UPDATE tokens
-                SET sora2_supported = ?, sora2_invite_code = ?, sora2_redeemed_count = ?, sora2_total_count = ?
+                SET sora2_supported = ?, sora2_invite_code = ?, sora2_redeemed_count = ?, sora2_total_count = ?, sora2_remaining_count = ?
                 WHERE id = ?
-            """, (supported, invite_code, redeemed_count, total_count, token_id))
+            """, (supported, invite_code, redeemed_count, total_count, remaining_count, token_id))
+            await db.commit()
+
+    async def update_token_sora2_remaining(self, token_id: int, remaining_count: int):
+        """Update token Sora2 remaining count"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE tokens SET sora2_remaining_count = ? WHERE id = ?
+            """, (remaining_count, token_id))
+            await db.commit()
+
+    async def update_token_sora2_cooldown(self, token_id: int, cooldown_until: Optional[datetime]):
+        """Update token Sora2 cooldown time"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                UPDATE tokens SET sora2_cooldown_until = ? WHERE id = ?
+            """, (cooldown_until, token_id))
             await db.commit()
 
     async def update_token_cooldown(self, token_id: int, cooled_until: datetime):
@@ -533,10 +587,10 @@ class Database:
         """Update admin configuration"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                UPDATE admin_config 
-                SET video_cooldown_threshold = ?, error_ban_threshold = ?, updated_at = CURRENT_TIMESTAMP
+                UPDATE admin_config
+                SET error_ban_threshold = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
-            """, (config.video_cooldown_threshold, config.error_ban_threshold))
+            """, (config.error_ban_threshold,))
             await db.commit()
     
     # Proxy config operations
@@ -571,14 +625,25 @@ class Database:
                 return WatermarkFreeConfig(**dict(row))
             return WatermarkFreeConfig()
 
-    async def update_watermark_free_config(self, enabled: bool):
+    async def update_watermark_free_config(self, enabled: bool, parse_method: str = None,
+                                          custom_parse_url: str = None, custom_parse_token: str = None):
         """Update watermark-free configuration"""
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                UPDATE watermark_free_config
-                SET watermark_free_enabled = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = 1
-            """, (enabled,))
+            if parse_method is None and custom_parse_url is None and custom_parse_token is None:
+                # Only update enabled status
+                await db.execute("""
+                    UPDATE watermark_free_config
+                    SET watermark_free_enabled = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (enabled,))
+            else:
+                # Update all fields
+                await db.execute("""
+                    UPDATE watermark_free_config
+                    SET watermark_free_enabled = ?, parse_method = ?, custom_parse_url = ?,
+                        custom_parse_token = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                """, (enabled, parse_method or "third_party", custom_parse_url, custom_parse_token))
             await db.commit()
 
     # Video length config operations

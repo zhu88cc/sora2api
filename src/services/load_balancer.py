@@ -14,12 +14,13 @@ class LoadBalancer:
         # Use image timeout from config as lock timeout
         self.token_lock = TokenLock(lock_timeout=config.image_timeout)
 
-    async def select_token(self, for_image_generation: bool = False) -> Optional[Token]:
+    async def select_token(self, for_image_generation: bool = False, for_video_generation: bool = False) -> Optional[Token]:
         """
         Select a token using random load balancing
 
         Args:
             for_image_generation: If True, only select tokens that are not locked for image generation
+            for_video_generation: If True, filter out tokens with Sora2 quota exhausted (sora2_cooldown_until not expired) and tokens that don't support Sora2
 
         Returns:
             Selected token or None if no available tokens
@@ -28,6 +29,33 @@ class LoadBalancer:
 
         if not active_tokens:
             return None
+
+        # If for video generation, filter out tokens with Sora2 quota exhausted and tokens without Sora2 support
+        if for_video_generation:
+            from datetime import datetime
+            available_tokens = []
+            for token in active_tokens:
+                # Skip tokens that don't support Sora2
+                if not token.sora2_supported:
+                    continue
+
+                # Check if Sora2 cooldown has expired and refresh if needed
+                if token.sora2_cooldown_until and token.sora2_cooldown_until <= datetime.now():
+                    await self.token_manager.refresh_sora2_remaining_if_cooldown_expired(token.id)
+                    # Reload token data after refresh
+                    token = await self.token_manager.db.get_token(token.id)
+
+                # Skip tokens that are in Sora2 cooldown (quota exhausted)
+                if token and token.sora2_cooldown_until and token.sora2_cooldown_until > datetime.now():
+                    continue
+
+                if token:
+                    available_tokens.append(token)
+
+            if not available_tokens:
+                return None
+
+            active_tokens = available_tokens
 
         # If for image generation, filter out locked tokens
         if for_image_generation:

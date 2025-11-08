@@ -27,6 +27,9 @@ class Token(BaseModel):
     sora2_invite_code: Optional[str] = None  # Sora2邀请码
     sora2_redeemed_count: int = 0  # Sora2已用次数
     sora2_total_count: int = 0  # Sora2总次数
+    # Sora2 剩余次数
+    sora2_remaining_count: int = 0  # Sora2剩余可用次数
+    sora2_cooldown_until: Optional[datetime] = None  # Sora2冷却时间
 
 class TokenStats(BaseModel):
     """Token statistics"""
@@ -65,7 +68,6 @@ class RequestLog(BaseModel):
 class AdminConfig(BaseModel):
     """Admin configuration"""
     id: int = 1
-    video_cooldown_threshold: int = 30
     error_ban_threshold: int = 3
     updated_at: Optional[datetime] = None
 
@@ -81,6 +83,9 @@ class WatermarkFreeConfig(BaseModel):
     """Watermark-free mode configuration"""
     id: int = 1
     watermark_free_enabled: bool = False
+    parse_method: str = "third_party"  # "third_party" or "custom"
+    custom_parse_url: Optional[str] = None  # Custom parse server URL
+    custom_parse_token: Optional[str] = None  # Custom parse server access token
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
